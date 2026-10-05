@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WaistWise — Waist to Height Ratio Calculator, BRI &amp; ABSI Calculator</title>
+<meta name="description" content="WaistWise is a free waist to height ratio calculator that also computes your Body Roundness Index (BRI), A Body Shape Index (ABSI) and waist-hip ratio, with an interactive Ashwell risk matrix and a frame-size-adjusted healthy waist range.">
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script id="v3-waistwise-waist-health-lib">
+/* WaistWise — waist-health calculator logic.
+ * Pure functions only: no DOM, window, document, localStorage, navigator.
+ * Shipped inside <script id="v3-waistwise-waist-health-lib">.
+ * Tests eval this exact block from the finished HTML.
+ *
+ * All metrics are ESTIMATES for informational purposes only.
+ */
+'use strict';
+
+function wwTrim(s){ return (s === undefined || s === null) ? '' : String(s).trim(); }
+
+function wwParseNum(v, fallback){
+  if (fallback === undefined) fallback = 0;
+  if (typeof v === 'number' && isFinite(v)) return v;
+  var s = wwTrim(v).replace(/[,\s]/g, '');
+  if (s === '' || s === '-' || s === '.' || s === '-.') return fallback;
+  var n = parseFloat(s);
+  return isFinite(n) ? n : fallback;
+}
+
+function wwClamp(v, min, max){
+  if (!isFinite(v)) return min;
+  if (v < min) return min;
+  if (v > max) return max;
+  return v;
+}
+
+/* ---------- unit conversion ---------- */
+/* from: 'cm' | 'in'  -> returns centimetres */
+function wwToCm(v, from){
+  var n = wwParseNum(v, NaN);
+  if (!isFinite(n)) return NaN;
+  return from === 'in' ? n * 2.54 : n;
+}
+/* kg <-> lb */
+function wwToKg(v, from){
+  var n = wwParseNum(v, NaN);
+  if (!isFinite(n)) return NaN;
+  return from === 'lb' ? n * 0.45359237 : n;
+}
+
+/* ---------- sanity guard ---------- */
+function wwValidPositive(n){
+  return isFinite(n) && n > 0;
+}
+
+/* ---------- 1. Waist-to-Height Ratio (WHtR) ----------
+ * Ashwell categories (estimates): <0.40 take care, 0.40–0.50 healthy,
+ * 0.50–0.60 increased risk, >0.60 highest risk. */
+function wwWhtr(waistCm, heightCm){
+  var w = wwParseNum(waistCm, NaN), h = wwParseNum(heightCm, NaN);
+  if (!wwValidPositive(w)) return { value:null, error:'Enter a waist measurement above 0.' };
+  if (!wwValidPositive(h)) return { value:null, error:'Enter a height measurement above 0.' };
+  var v = w / h;
+  var cat, label, risk, tone;
+  if (v < 0.40){ cat='take-care-low'; label='Very low — take care'; risk='below-healthy'; tone='amber'; }
+  else if (v <= 0.50){ cat='healthy'; label='Healthy — keep it up'; risk='healthy'; tone='teal'; }
+  else if (v <= 0.60){ cat='increased'; label='Increased risk — take care'; risk='elevated'; tone='amber'; }
+  else { cat='highest'; label='Highest risk — act now'; risk='high'; tone='rose'; }
+  return { value:v, category:cat, label:label, risk:risk, tone:tone };
+}
+
+/* ---------- 2. Body Roundness Index (BRI) ----------
+ * BRI = 364.2 - 365.5 * sqrt(1 - ((WC/2pi)^2 / (0.5*height)^2))
+ * WC and height in METRES. (Thomas et al., 2013) */
+function wwBri(waistCm, heightCm){
+  var w = wwParseNum(waistCm, NaN), h = wwParseNum(heightCm, NaN);
+  if (!wwValidPositive(w)) return { value:null, error:'Enter a waist measurement above 0.' };
+  if (!wwValidPositive(h)) return { value:null, error:'Enter a height measurement above 0.' };
+  var wc = w / 100, ht = h / 100;
+  var r = wc / (2 * Math.PI);            /* equivalent radius from waist circumference */
+  var inner = 1 - (r * r) / Math.pow(0.5 * ht, 2);
+  if (!(inner > 0)) return { value:null, error:'Measurements are inconsistent (waist too large for height).' };
+  var v = 364.2 - 365.5 * Math.sqrt(inner);
+  var cat, label, tone;
+  if (v < 3.41){ cat='lean'; label='Very lean — low roundness'; tone='teal'; }
+  else if (v <= 4.44){ cat='healthy'; label='Healthy roundness'; tone='teal'; }
+  else if (v <= 5.45){ cat='elevated'; label='Elevated roundness'; tone='amber'; }
+  else { cat='high'; label='High roundness'; tone='rose'; }
+  return { value:v, category:cat, label:label, tone:tone };
+}
+
+/* ---------- 3. A Body Shape Index (ABSI) ----------
+ * ABSI = WC(m) / (BMI^(2/3) * height(m)^(1/2))   (Krakauer & Krakauer, 2012)
+ * Expressed in m^(11/6). Typical range ~0.07–0.085. */
+function wwAbsi(waistCm, weightKg, heightCm){
+  var w = wwParseNum(waistCm, NaN), kg = wwParseNum(weightKg, NaN), h = wwParseNum(heightCm, NaN);
+  if (!wwValidPositive(w)) return { value:null, error:'Enter a waist measurement above 0.' };
+  if (!wwValidPositive(h)) return { value:null, error:'Enter a height measurement above 0.' };
+  if (!wwValidPositive(kg)) return { value:null, error:'ABSI needs a body weight too.' };
+  var wc = w / 100, ht = h / 100;
+  var bmi = kg / (ht * ht);
+  if (!wwValidPositive(bmi)) return { value:null, error:'Could not compute BMI from height and weight.' };
+  var v = wc / (Math.pow(bmi, 2/3) * Math.sqrt(ht));
+  var cat, label, tone;
+  if (v < 0.075){ cat='low'; label='Low mortality risk'; tone='teal'; }
+  else if (v <= 0.080){ cat='average'; label='Average risk'; tone='amber'; }
+  else if (v <= 0.085){ cat='high'; label='High risk'; tone='amber'; }
+  else { cat='very-high'; label='Very high risk'; tone='rose'; }
+  return { value:v, category:cat, label:label, tone:tone };
+}
+
+/* ---------- 4. Waist–Hip Ratio (WHR) ----------
+ * WHO abdominal-obesity cutoffs: men ≥0.90, women ≥0.85 (estimates). */
+function wwWhr(waistCm, hipCm, sex){
+  var w = wwParseNum(waistCm, NaN), hip = wwParseNum(hipCm, NaN);
+  if (!wwValidPositive(w)) return { value:null, error:'Enter a waist measurement above 0.' };
+  if (!wwValidPositive(hip)) return { value:null, error:'Enter a hip measurement above 0.' };
+  var v = w / hip;
+  var female = (String(sex).toLowerCase().indexOf('f') === 0);
+  var lowMax = female ? 0.80 : 0.85;
+  var highMin = female ? 0.85 : 0.90;
+  var cat, label, tone;
+  if (v < lowMax){ cat='low'; label='Low risk — balanced distribution'; tone='teal'; }
+  else if (v < highMin){ cat='moderate'; label='Moderate risk — watch it'; tone='amber'; }
+  else { cat='high'; label='High risk — abdominal obesity range'; tone='rose'; }
+  return { value:v, category:cat, label:label, tone:tone };
+}
+
+/* ---------- frame size (wrist method) ----------
+ * frame ratio = height(cm) / wrist(cm)
+ * men: >10.4 small, 9.6–10.4 medium, <9.6 large
+ * women: >11.0 small, 10.1–11.0 medium, <10.1 large */
+function wwFrameSize(sex, heightCm, wristCm){
+  var h = wwParseNum(heightCm, NaN), wrist = wwParseNum(wristCm, NaN);
+  if (!wwValidPositive(h) || !wwValidPositive(wrist))
+    return { id:null, error:'Need height and wrist circumference for frame size.' };
+  var female = (String(sex).toLowerCase().indexOf('f') === 0);
+  var r = h / wrist;
+  var id, label;
+  if (female){ id = r > 11.0 ? 'small' : (r >= 10.1 ? 'medium' : 'large'); }
+  else { id = r > 10.4 ? 'small' : (r >= 9.6 ? 'medium' : 'large'); }
+  label = id.charAt(0).toUpperCase() + id.slice(1) + ' frame';
+  return { id:id, label:label, ratio:r };
+}
+
+/* ---------- frame-size-adjusted healthy waist range ----------
+ * Base range from healthy WHtR 0.40–0.50; frame shifts ±3%. */
+function wwHealthyRange(heightCm, frameId){
+  var h = wwParseNum(heightCm, NaN);
+  if (!wwValidPositive(h)) return { low:null, high:null, error:'Need height for the healthy range.' };
+  var adj = frameId === 'small' ? 0.97 : (frameId === 'large' ? 1.03 : 1.0);
+  var low = h * 0.40 * adj;
+  var high = h * 0.50 * adj;
+  return { low:low, high:high, frame:frameId || 'medium' };
+}
+
+/* ---------- overall waist-health score (0–100, estimate) ----------
+ * Weighted: WHtR 35, BRI 25, ABSI 25, WHR 15. Category -> points. */
+function wwMetricPoints(result, weights){
+  if (!result || result.value === null || result.value === undefined) return null;
+  var map = {
+    'healthy':1, 'low':1, 'average':0.75, 'moderate':0.5,
+    'lean':1, 'take-care-low':0.75, 'increased':0.5, 'elevated':0.5,
+    'high':0.25, 'very-high':0, 'highest':0
+  };
+  var p = map[result.category];
+  if (p === undefined) p = 0.5;
+  return p * weights;
+}
+function wwScore(results){
+  var w = { whtr:35, bri:25, absi:25, whr:15 };
+  var total = 0, possible = 0, counted = 0;
+  ['whtr','bri','absi','whr'].forEach(function(k){
+    var pts = wwMetricPoints(results[k], w[k]);
+    if (pts !== null){ total += pts; possible += w[k]; counted++; }
+  });
+  if (counted === 0 || possible === 0) return { value:null, counted:0, error:'No valid metrics yet.' };
+  var v = Math.round(total / possible * 100);
+  var grade = v >= 85 ? 'Excellent' : (v >= 70 ? 'Good' : (v >= 50 ? 'Fair' : 'Needs work'));
+  return { value:v, grade:grade, counted:counted };
+}
+
+/* ---------- Ashwell risk matrix helper (pure) ----------
+ * Given waist/height in cm, returns the matrix zone id used by the SVG visual. */
+function wwAshwellZone(waistCm, heightCm){
+  var r = wwWhtr(waistCm, heightCm);
+  if (r.value === null) return 'none';
+  return r.category; /* 'take-care-low' | 'healthy' | 'increased' | 'highest' */
+}
+
+/* ---------- progress tracker helpers (pure; storage lives in the UI layer) ---------- */
+function wwLogEntry(dateIso, waistCm, heightCm, weightKg, hipCm, sex){
+  var whtr = wwWhtr(waistCm, heightCm);
+  var bri = wwBri(waistCm, heightCm);
+  var absi = wwAbsi(waistCm, weightKg, heightCm);
+  var whr = wwWhr(waistCm, hipCm, sex);
+  return {
+    date: wwTrim(dateIso) || new Date().toISOString().slice(0,10),
+    waist: wwParseNum(waistCm, NaN),
+    height: wwParseNum(heightCm, NaN),
+    weight: wwParseNum(weightKg, NaN),
+    hip: wwParseNum(hipCm, NaN),
+    sex: sex,
+    whtr: whtr.value, bri: bri.value, absi: absi.value, whr: whr.value
+  };
+}
+function wwSortLogDesc(log){
+  return (log || []).slice().sort(function(a,b){ return a.date < b.date ? 1 : (a.date > b.date ? -1 : 0); });
+}
+/* trend of last two entries: -1 down, 0 same, 1 up (per key) */
+function wwTrend(log, key){
+  var s = wwSortLogDesc(log);
+  if (s.length < 2) return null;
+  var a = s[0][key], b = s[1][key];
+  if (!isFinite(a) || !isFinite(b)) return null;
+  if (Math.abs(a - b) < 1e-9) return 0;
+  return a > b ? 1 : -1;
+}
+function wwChangePct(log, key){
+  var s = wwSortLogDesc(log);
+  if (s.length < 2) return null;
+  var a = s[0][key], b = s[1][key];
+  if (!isFinite(a) || !isFinite(b) || b === 0) return null;
+  return (a - b) / b * 100;
+}
+
+</script>
+<style>
+  :root{
+    --bg:#101418; --panel:#171C22; --panel2:#1D242C; --line:#28303A;
+    --teal:#2DD4BF; --pink:#F472B6; --amber:#FBBF24; --rose:#FB7185; --ink:#E8EEF3; --muted:#9AA7B4;
+  }
+  html{scroll-behavior:smooth}
+  body{background:var(--bg); color:var(--ink); font-family:'Inter',system-ui,sans-serif;}
+  .mono{font-family:'JetBrains Mono',ui-monospace,monospace;}
+  /* medical-lab grid backdrop */
+  .lab-grid{
+    background-image:
+      linear-gradient(rgba(45,212,191,.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(45,212,191,.045) 1px, transparent 1px);
+    background-size:34px 34px;
+  }
+  .lab-card{
+    background:linear-gradient(180deg, var(--panel2), var(--panel));
+    border:1px solid var(--line);
+    border-radius:1rem;
+    box-shadow:0 20px 44px -24px rgba(0,0,0,.8);
+    position:relative;
+  }
+  .lab-card::before{
+    content:""; position:absolute; inset:0 0 auto 0; height:3px; border-radius:1rem 1rem 0 0;
+    background:linear-gradient(90deg, var(--teal), var(--pink));
+    opacity:.85;
+  }
+  .spec-tag{
+    font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.22em; text-transform:uppercase;
+    color:var(--teal); border:1px solid rgba(45,212,191,.4); border-radius:.4rem; padding:.2rem .5rem;
+    background:rgba(45,212,191,.08);
+  }
+  .field{
+    background:#0C0F13; border:1.5px solid var(--line); border-radius:.65rem;
+    padding:.65rem .8rem; width:100%; color:var(--ink);
+  }
+  .field:focus{outline:2px solid var(--teal); outline-offset:1px; border-color:var(--teal);}
+  label.lab-label{font-size:.72rem; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted);}
+  .btn-lab{
+    background:linear-gradient(135deg, var(--teal), #14b8a6); color:#06251F; font-weight:800;
+    border-radius:.8rem; transition:transform .12s ease, box-shadow .12s ease;
+    box-shadow:0 10px 24px -10px rgba(45,212,191,.55);
+  }
+  .btn-lab:hover{transform:translateY(-1px); box-shadow:0 14px 28px -10px rgba(45,212,191,.65);}
+  .btn-lab:active{transform:translateY(1px);}
+  .btn-ghost{border:1.5px solid var(--line); color:var(--ink); border-radius:.8rem; transition:all .12s ease;}
+  .btn-ghost:hover{border-color:var(--teal); color:var(--teal);}
+  .chip{font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; padding:.28rem .6rem; border-radius:999px; letter-spacing:.04em;}
+  .chip-teal{background:rgba(45,212,191,.14); color:var(--teal); border:1px solid rgba(45,212,191,.45);}
+  .chip-amber{background:rgba(251,191,36,.12); color:var(--amber); border:1px solid rgba(251,191,36,.45);}
+  .chip-rose{background:rgba(251,113,133,.12); color:var(--rose); border:1px solid rgba(251,113,133,.45);}
+  .meter{height:10px; border-radius:999px; background:#0C0F13; border:1px solid var(--line); overflow:hidden;}
+  .meter > div{height:100%; border-radius:999px; transition:width .5s ease;}
+  .metric-num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:2rem; line-height:1;}
+  .faq-item summary{cursor:pointer; list-style:none;}
+  .faq-item summary::-webkit-details-marker{display:none;}
+  .faq-item summary::before{content:"+"; color:var(--teal); font-weight:700; margin-right:.6rem;}
+  .faq-item[open] summary::before{content:"–";}
+  .no-print{}
+  @media print{ .no-print{display:none;} }
+  .vial{width:14px; border-radius:6px; background:#0C0F13; border:1px solid var(--line); position:relative; overflow:hidden;}
+  .vial-fill{position:absolute; bottom:0; left:0; right:0;}
+  #matrix-svg{cursor:crosshair;}
+  .matrix-tip{pointer-events:none;}
+  .article h2{font-size:1.35rem; font-weight:800; margin:2.2rem 0 .8rem; color:var(--teal);}
+  .article h3{font-size:1.1rem; font-weight:700; margin:1.6rem 0 .6rem; color:#fff;}
+  .article p{margin:.8rem 0; line-height:1.75; color:#C6D0DA;}
+  .article ul{margin:.8rem 0; padding-left:1.4rem; list-style:disc; color:#C6D0DA; line-height:1.75;}
+  .article strong{color:#fff;}
+  .disclaimer{border-left:3px solid var(--pink); background:rgba(244,114,182,.07); border-radius:.5rem;}
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type":"Question","name":"What is a waist to height ratio calculator and why does it matter?","acceptedAnswer":{"@type":"Answer","text":"A waist to height ratio calculator divides your waist circumference by your height. Research led by Dr. Margaret Ashwell shows that keeping your waist less than half your height predicts cardiometabolic risk better than BMI alone, because waist size reflects visceral fat around the organs while BMI cannot tell muscle from fat."}},
+    {"@type":"Question","name":"What is a healthy waist to height ratio?","acceptedAnswer":{"@type":"Answer","text":"A waist to height ratio between 0.40 and 0.50 is considered healthy for adults. Below 0.40 may indicate being underweight, 0.50 to 0.60 signals increased health risk, and above 0.60 is the highest risk zone. These are screening estimates, not diagnoses — always confirm with a clinician."}},
+    {"@type":"Question","name":"What does a body roundness index calculator tell me?","acceptedAnswer":{"@type":"Answer","text":"A body roundness index calculator (BRI) models your body as an ellipse using waist circumference and height. A BRI around 3.41 is typical for a healthy body shape; values below that are leaner, while values above 5.45 indicate high roundness and elevated risk. BRI adds shape information that BMI misses."}},
+    {"@type":"Question","name":"How is an ABSI calculator different from BMI?","acceptedAnswer":{"@type":"Answer","text":"An ABSI calculator (A Body Shape Index) combines waist circumference, BMI and height into a single number expressed in m^(11/6). Higher ABSI means your waist is large relative to what your BMI and height would predict, which studies link to higher mortality risk. Values under 0.075 are low risk, while values above 0.085 are very high."}},
+    {"@type":"Question","name":"How do I measure my waist correctly for these calculators?","acceptedAnswer":{"@type":"Answer","text":"Stand relaxed, find the midpoint between your lowest rib and the top of your hip bone, wrap a tape measure snugly around your bare abdomen at that point, breathe out normally and read the measurement before breathing in. Measure in the morning before eating for the most consistent tracking."}},
+    {"@type":"Question","name":"Can these calculators replace medical advice?","acceptedAnswer":{"@type":"Answer","text":"No. WaistWise provides screening estimates for information and motivation only. These metrics do not diagnose any condition, and factors like pregnancy, muscle mass, age, ethnicity and medical history affect what is healthy for you. Discuss your results with a qualified health professional before changing diet or exercise habits."}}
+  ]
+}
+</script>
+</head>
+<body id="top" class="antialiased lab-grid">
+
+<!-- ============ STICKY HEADER ============ -->
+<header class="sticky top-0 z-50 border-b" style="background:rgba(16,20,24,.92); backdrop-filter:blur(10px); border-color:#28303A;">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6 h-16 flex items-center justify-between">
+    <a href="#top" class="flex items-center gap-2.5">
+      <svg width="34" height="34" viewBox="0 0 40 40" fill="none" aria-hidden="true">
+        <circle cx="20" cy="20" r="17" stroke="#2DD4BF" stroke-width="3"/>
+        <path d="M13 20c0-4 3-7 7-7s7 3 7 7-3 7-7 7-7-3-7-7z" stroke="#F472B6" stroke-width="3"/>
+        <path d="M20 13v14M13 20h14" stroke="#2DD4BF" stroke-width="1.6"/>
+      </svg>
+      <span class="text-2xl font-extrabold tracking-tight">Waist<span style="color:#2DD4BF">Wise</span></span>
+    </a>
+    <nav class="flex items-center gap-5 text-sm font-medium">
+      <a href="#top" class="hover:text-[#2DD4BF] transition">Home</a>
+      <a href="https://fixoraa.tech" class="hover:text-[#2DD4BF] transition">More Tools</a>
+    </nav>
+  </div>
+</header>
+
+<!-- ============ TOP AD ============ -->
+<div class="no-print mx-auto max-w-6xl px-4 sm:px-6 pt-4" role="complementary" aria-label="Advertisement">
+  <div class="mx-auto text-center" style="max-width:728px">
+    <span class="block text-[10px] tracking-[0.18em] uppercase text-slate-400 mb-1.5">Advertisement</span>
+    <div class="flex justify-center overflow-hidden">
+      <div class="origin-top scale-[0.44] sm:scale-100 shrink-0">
+        <script>
+          atOptions = { 'key' : '4e68ac77881c17fe128a46565d9a4e8c', 'format' : 'iframe', 'height' : 90, 'width' : 728, 'params' : {} };
+        </script>
+        <script src="https://www.highrevenueformat.com/4e68ac77881c17fe128a46565d9a4e8c/invoke.js"></script>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main class="mx-auto max-w-6xl px-4 sm:px-6 pb-10">
+
+  <!-- ============ HERO ============ -->
+  <section class="pt-8 pb-6 text-center">
+    <div class="inline-flex items-center gap-2 mb-4 px-4 py-1.5 rounded-full border text-xs font-bold tracking-widest uppercase" style="border-color:rgba(45,212,191,.45); color:#2DD4BF; background:rgba(45,212,191,.07);">
+      <span class="inline-block w-2 h-2 rounded-full animate-pulse" style="background:#2DD4BF"></span>
+      Unlimited Free Usage
+    </div>
+    <h1 class="text-3xl sm:text-5xl font-extrabold tracking-tight leading-tight">
+      Waist-Health Lab: <span style="color:#2DD4BF">WHtR</span>, <span style="color:#F472B6">BRI</span>, ABSI &amp; Waist-Hip Ratio
+    </h1>
+    <p class="mt-3 max-w-2xl mx-auto text-sm sm:text-base" style="color:#9AA7B4">
+      One tape measure, four medical-style metrics. Enter your waist, height, weight and hip — WaistWise runs the full waist-health panel and plots you on the interactive Ashwell risk matrix.
+    </p>
+    <p class="mt-2 mono text-[11px]" style="color:#5b6874">SAMPLE ANALYSIS · ESTIMATES ONLY · NO SIGNUP</p>
+  </section>
+
+  <!-- ============ INPUT PANEL ============ -->
+  <section class="lab-card p-5 sm:p-7 mb-6">
+    <div class="flex items-center justify-between mb-5 flex-wrap gap-2">
+      <span class="spec-tag">SPECIMEN INPUT</span>
+      <div class="flex items-center gap-3">
+        <label class="lab-label" for="unit-select">Units</label>
+        <select id="unit-select" class="field !w-auto mono text-sm">
+          <option value="cm">cm / kg</option>
+          <option value="in">in / lb</option>
+        </select>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div>
+        <label class="lab-label" for="sex-select">Sex</label>
+        <select id="sex-select" class="field mono mt-1">
+          <option value="female">Female</option>
+          <option value="male">Male</option>
+        </select>
+      </div>
+      <div>
+        <label class="lab-label" for="waist-input">Waist <span class="unit-label">cm</span></label>
+        <input id="waist-input" type="number" min="0" step="0.1" placeholder="82" class="field mono mt-1">
+      </div>
+      <div>
+        <label class="lab-label" for="height-input">Height <span class="unit-label">cm</span></label>
+        <input id="height-input" type="number" min="0" step="0.1" placeholder="170" class="field mono mt-1">
+      </div>
+      <div>
+        <label class="lab-label" for="weight-input">Weight <span class="wunit-label">kg</span></label>
+        <input id="weight-input" type="number" min="0" step="0.1" placeholder="68" class="field mono mt-1">
+      </div>
+      <div>
+        <label class="lab-label" for="hip-input">Hip <span class="unit-label">cm</span></label>
+        <input id="hip-input" type="number" min="0" step="0.1" placeholder="100" class="field mono mt-1">
+      </div>
+      <div>
+        <label class="lab-label" for="wrist-input">Wrist <span class="unit-label">cm</span> <span style="color:#5b6874">(frame)</span></label>
+        <input id="wrist-input" type="number" min="0" step="0.1" placeholder="16" class="field mono mt-1">
+      </div>
+    </div>
+    <div class="mt-5 flex flex-wrap items-center gap-3">
+      <button id="calc-btn" class="btn-lab px-7 py-3 text-sm font-extrabold tracking-wide">RUN FULL ANALYSIS</button>
+      <button id="sample-btn" class="btn-ghost px-5 py-3 text-sm font-semibold">Load sample</button>
+      <p id="input-error" class="text-sm font-medium" style="color:#FB7185"></p>
+    </div>
+  </section>
+
+  <!-- ============ FOUR METRIC CARDS ============ -->
+  <section id="results" class="mb-6">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <span class="spec-tag">LAB RESULTS — PANEL OF 4</span>
+      <span id="report-date" class="mono text-[11px]" style="color:#5b6874"></span>
+    </div>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+
+      <div class="lab-card p-5">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-xs font-bold tracking-widest uppercase" style="color:#9AA7B4">Waist ÷ Height</h2>
+          <span class="chip chip-teal" id="whtr-chip">—</span>
+        </div>
+        <p class="metric-num" style="color:#2DD4BF" id="whtr-value">—</p>
+        <p class="text-xs mt-1 font-semibold" id="whtr-label" style="color:#9AA7B4">Enter measurements</p>
+        <div class="meter mt-3"><div id="whtr-bar" style="width:0%; background:linear-gradient(90deg,#2DD4BF,#F472B6)"></div></div>
+        <p class="text-[11px] mt-2 leading-relaxed" style="color:#5b6874">Keep waist below <strong class="mono">½</strong> your height (Ashwell).</p>
+      </div>
+
+      <div class="lab-card p-5">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-xs font-bold tracking-widest uppercase" style="color:#9AA7B4">Roundness (BRI)</h2>
+          <span class="chip chip-teal" id="bri-chip">—</span>
+        </div>
+        <p class="metric-num" style="color:#F472B6" id="bri-value">—</p>
+        <p class="text-xs mt-1 font-semibold" id="bri-label" style="color:#9AA7B4">Enter measurements</p>
+        <div class="meter mt-3"><div id="bri-bar" style="width:0%; background:linear-gradient(90deg,#2DD4BF,#F472B6)"></div></div>
+        <p class="text-[11px] mt-2 leading-relaxed" style="color:#5b6874">Body shape as an ellipse: <strong class="mono">~3.41</strong> is typical healthy.</p>
+      </div>
+
+      <div class="lab-card p-5">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-xs font-bold tracking-widest uppercase" style="color:#9AA7B4">Shape Index (ABSI)</h2>
+          <span class="chip chip-teal" id="absi-chip">—</span>
+        </div>
+        <p class="metric-num" style="color:#2DD4BF" id="absi-value">—</p>
+        <p class="text-xs mt-1 font-semibold" id="absi-label" style="color:#9AA7B4">Enter measurements</p>
+        <div class="meter mt-3"><div id="absi-bar" style="width:0%; background:linear-gradient(90deg,#2DD4BF,#F472B6)"></div></div>
+        <p class="text-[11px] mt-2 leading-relaxed" style="color:#5b6874">Waist vs. what BMI &amp; height predict (<strong class="mono">m<sup>11/6</sup></strong>).</p>
+      </div>
+
+      <div class="lab-card p-5">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-xs font-bold tracking-widest uppercase" style="color:#9AA7B4">Waist ÷ Hip</h2>
+          <span class="chip chip-teal" id="whr-chip">—</span>
+        </div>
+        <p class="metric-num" style="color:#F472B6" id="whr-value">—</p>
+        <p class="text-xs mt-1 font-semibold" id="whr-label" style="color:#9AA7B4">Enter measurements</p>
+        <div class="meter mt-3"><div id="whr-bar" style="width:0%; background:linear-gradient(90deg,#2DD4BF,#F472B6)"></div></div>
+        <p class="text-[11px] mt-2 leading-relaxed" style="color:#5b6874">WHO obesity line: <strong class="mono">0.90</strong> men · <strong class="mono">0.85</strong> women.</p>
+      </div>
+    </div>
+
+    <!-- overall score -->
+    <div class="lab-card p-5 sm:p-6 mt-4 flex flex-col sm:flex-row items-center gap-5">
+      <div class="flex items-center gap-4">
+        <svg width="96" height="96" viewBox="0 0 96 96" aria-hidden="true">
+          <circle cx="48" cy="48" r="40" fill="none" stroke="#28303A" stroke-width="10"/>
+          <circle id="score-ring" cx="48" cy="48" r="40" fill="none" stroke="#2DD4BF" stroke-width="10"
+                  stroke-linecap="round" stroke-dasharray="251.3" stroke-dashoffset="251.3"
+                  transform="rotate(-90 48 48)" style="transition:stroke-dashoffset .8s ease"/>
+          <text id="score-value" x="48" y="56" text-anchor="middle" fill="#E8EEF3" font-size="24" font-weight="700" font-family="JetBrains Mono,monospace">–</text>
+        </svg>
+        <div>
+          <p class="text-xs font-bold tracking-widest uppercase" style="color:#9AA7B4">Waist-Health Score</p>
+          <p class="text-xl font-extrabold" id="score-grade">Awaiting data</p>
+          <p class="text-[11px] mono" style="color:#5b6874">WEIGHTED: WHtR 35 · BRI 25 · ABSI 25 · WHR 15</p>
+        </div>
+      </div>
+      <p class="text-xs leading-relaxed sm:ml-auto max-w-md" style="color:#9AA7B4">
+        The score blends all four panel metrics into one 0–100 number so you can track overall progress at a glance.
+        It is a screening estimate, not a diagnosis — the individual metric cards above carry the real detail.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ ASHWELL MATRIX + FRAME RANGE ============ -->
+  <section class="grid lg:grid-cols-5 gap-4 mb-6">
+    <div class="lab-card p-5 sm:p-6 lg:col-span-3">
+      <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
+        <span class="spec-tag">ASHWELL RISK MATRIX</span>
+        <span class="mono text-[11px]" style="color:#5b6874">CLICK MATRIX TO SET WAIST + HEIGHT</span>
+      </div>
+      <p class="text-xs mb-3" style="color:#9AA7B4">The diagonal bands are the Ashwell zones: <strong style="color:#2DD4BF">green</strong> = keep waist under half your height. Your dot updates live.</p>
+      <div class="relative">
+        <svg id="matrix-svg" viewBox="0 0 560 420" class="w-full rounded-lg border" style="border-color:#28303A" role="img" aria-label="Interactive Ashwell waist-to-height risk matrix">
+          <g id="matrix-cells"></g>
+          <g id="matrix-lines"></g>
+          <g id="matrix-marker"></g>
+        </svg>
+        <div id="matrix-tip" class="matrix-tip absolute hidden mono text-[11px] px-2 py-1 rounded border" style="background:#0C0F13; border-color:#28303A; color:#E8EEF3"></div>
+      </div>
+      <div class="flex flex-wrap gap-3 mt-3 text-[11px] mono" style="color:#9AA7B4">
+        <span><span class="inline-block w-3 h-3 rounded-sm mr-1 align-middle" style="background:#1E4D78"></span>&lt;0.40 take care</span>
+        <span><span class="inline-block w-3 h-3 rounded-sm mr-1 align-middle" style="background:#0F6B5C"></span>0.40–0.50 healthy</span>
+        <span><span class="inline-block w-3 h-3 rounded-sm mr-1 align-middle" style="background:#7A5A17"></span>0.50–0.60 increased</span>
+        <span><span class="inline-block w-3 h-3 rounded-sm mr-1 align-middle" style="background:#7A2434"></span>&gt;0.60 highest</span>
+      </div>
+    </div>
+
+    <div class="lg:col-span-2 flex flex-col gap-4">
+      <div class="lab-card p-5 sm:p-6">
+        <span class="spec-tag">FRAME-SIZE ADJUSTED RANGE</span>
+        <p class="text-sm mt-3 leading-relaxed" style="color:#9AA7B4">
+          Bone frame shifts your healthy waist range by <strong class="mono">±3%</strong>. WaistWise derives frame from wrist circumference.
+        </p>
+        <div class="mt-4 flex items-center gap-3">
+          <div class="vial h-24"><div id="frame-vial" class="vial-fill" style="height:50%; background:linear-gradient(180deg,#2DD4BF,#14b8a6)"></div></div>
+          <div>
+            <p class="mono text-xs" style="color:#5b6874">FRAME CLASS</p>
+            <p class="text-xl font-extrabold" id="frame-label" style="color:#2DD4BF">—</p>
+            <p class="mono text-[11px]" id="frame-ratio" style="color:#5b6874"></p>
+          </div>
+        </div>
+        <div class="mt-4">
+          <p class="mono text-xs mb-2" style="color:#5b6874">HEALTHY WAIST RANGE <span id="range-unit"></span></p>
+          <div class="relative h-8 rounded-full border" style="background:#0C0F13; border-color:#28303A">
+            <div id="range-band" class="absolute top-0 bottom-0 rounded-full" style="background:rgba(45,212,191,.28); border:1px solid rgba(45,212,191,.6); left:20%; right:20%"></div>
+            <div id="range-marker" class="absolute top-[-6px] bottom-[-6px] w-[3px] rounded" style="background:#F472B6; left:50%"></div>
+          </div>
+          <div class="flex justify-between mt-1 mono text-xs" style="color:#2DD4BF">
+            <span id="range-low">—</span><span id="range-high">—</span>
+          </div>
+          <p class="text-[11px] mt-2" style="color:#5b6874">Pink needle = your current waist. Teal band = your frame-adjusted healthy range.</p>
+        </div>
+      </div>
+
+      <div class="lab-card p-5 sm:p-6">
+        <span class="spec-tag">HOW TO MEASURE</span>
+        <ol class="text-xs mt-3 space-y-2 leading-relaxed list-decimal pl-5" style="color:#9AA7B4">
+          <li>Stand relaxed, arms at your sides.</li>
+          <li>Find the midpoint between your lowest rib and hip bone.</li>
+          <li>Wrap the tape snugly around bare skin — no sucking in.</li>
+          <li>Breathe out normally; read before breathing in.</li>
+          <li>Hips: measure the widest point of your buttocks.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PROGRESS TRACKER ============ -->
+  <section class="lab-card p-5 sm:p-6 mb-6">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <span class="spec-tag">PROGRESS TRACKER — LOGGED ON THIS DEVICE</span>
+      <div class="flex gap-2">
+        <button id="log-btn" class="btn-lab px-5 py-2.5 text-sm font-bold">LOG MEASUREMENT</button>
+        <button id="clear-log-btn" class="btn-ghost px-4 py-2.5 text-sm">Clear</button>
+      </div>
+    </div>
+    <div id="log-empty" class="text-sm py-6 text-center" style="color:#5b6874">
+      No entries yet. Run an analysis above, then log it — WaistWise keeps your history on this device and charts your trend.
+    </div>
+    <div id="log-content" class="hidden">
+      <div class="grid sm:grid-cols-4 gap-3 mb-4">
+        <div class="rounded-lg p-3 border" style="border-color:#28303A; background:#0C0F13">
+          <p class="mono text-[10px] tracking-widest" style="color:#5b6874">WHtR TREND</p>
+          <p class="mono text-lg font-bold" id="trend-whtr" style="color:#2DD4BF">—</p>
+        </div>
+        <div class="rounded-lg p-3 border" style="border-color:#28303A; background:#0C0F13">
+          <p class="mono text-[10px] tracking-widest" style="color:#5b6874">BRI TREND</p>
+          <p class="mono text-lg font-bold" id="trend-bri" style="color:#F472B6">—</p>
+        </div>
+        <div class="rounded-lg p-3 border" style="border-color:#28303A; background:#0C0F13">
+          <p class="mono text-[10px] tracking-widest" style="color:#5b6874">ABSI TREND</p>
+          <p class="mono text-lg font-bold" id="trend-absi" style="color:#2DD4BF">—</p>
+        </div>
+        <div class="rounded-lg p-3 border" style="border-color:#28303A; background:#0C0F13">
+          <p class="mono text-[10px] tracking-widest" style="color:#5b6874">WAIST CHANGE</p>
+          <p class="mono text-lg font-bold" id="trend-waist" style="color:#F472B6">—</p>
+        </div>
+      </div>
+      <svg id="sparkline" viewBox="0 0 600 120" class="w-full rounded-lg border mb-4" style="border-color:#28303A; background:#0C0F13" role="img" aria-label="Waist to height ratio trend chart"></svg>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs mono">
+          <thead>
+            <tr class="text-left" style="color:#5b6874">
+              <th class="py-2 pr-3">DATE</th><th class="py-2 pr-3">WAIST</th><th class="py-2 pr-3">WHtR</th>
+              <th class="py-2 pr-3">BRI</th><th class="py-2 pr-3">ABSI</th><th class="py-2 pr-3">WHR</th><th class="py-2"></th>
+            </tr>
+          </thead>
+          <tbody id="log-list"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BOTTOM AD ============ -->
+  <div class="no-print mx-auto max-w-6xl px-4 sm:px-6 pb-4" role="complementary" aria-label="Advertisement">
+    <div class="mx-auto text-center" style="max-width:728px">
+      <span class="block text-[10px] tracking-[0.18em] uppercase text-slate-400 mb-1.5">Advertisement</span>
+      <div class="flex justify-center overflow-hidden">
+        <script async src="https://js.wpadmngr.com/static/adManager.js" data-admpid="464498"></script>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SEO ARTICLE ============ -->
+  <article class="article max-w-3xl mx-auto px-1 pt-6 pb-8">
+    <h2>Waist to Height Ratio Calculator: The One Number That Beats BMI</h2>
+    <p>Step on most bathroom scales and you get a weight. Step into most health apps and you get a <strong>BMI</strong>. Both numbers miss the thing that actually predicts heart disease, type 2 diabetes and early mortality: where your fat sits. A <strong>waist to height ratio calculator</strong> fixes that blind spot with a single, brutally simple formula — waist circumference divided by height — and a rule you can remember for life: <strong>keep your waist to less than half your height</strong>.</p>
+    <p>The science behind this rule comes from two decades of research led by Dr. Margaret Ashwell and colleagues, who pooled data from dozens of studies and concluded that waist-to-height ratio (WHtR) outperforms BMI and waist circumference alone as a screening tool for cardiometabolic risk. The reason is anatomical. BMI divides weight by height squared, which means a rugby player and a couch potato of the same build can share the same "overweight" label. Waist circumference alone ignores the fact that a 90&nbsp;cm waist means something very different on a 160&nbsp;cm frame than on a 195&nbsp;cm frame. WHtR solves both problems at once: it scales your waist against your own skeleton, and it targets <strong>visceral fat</strong> — the fat packed around your liver, intestines and other organs — which is the metabolically dangerous kind.</p>
+    <p>The Ashwell categories are refreshingly plain-spoken. A WHtR between <strong>0.40 and 0.50</strong> is the healthy zone. Below 0.40, you may be underweight and should take care. Between <strong>0.50 and 0.60</strong>, risk is increased and it is time to take care. Above <strong>0.60</strong>, the guidance is unambiguous: act now. Unlike BMI's population-average curves, these thresholds apply to men and women of all ages with only minor caveats, which is why public health researchers have pushed the "keep your waist under half your height" message as a replacement for confusing BMI charts.</p>
+
+    <h2>Body Roundness Index Calculator: Your Shape as a Number</h2>
+    <p>If WHtR is a straight line, the <strong>body roundness index calculator</strong> is a curve. Developed by Diana Thomas and colleagues in 2013, the Body Roundness Index (BRI) models the human body as an ellipse: your height is the long axis and your waist-derived radius is the short axis. The formula — 364.2 minus 365.5 times the square root of one minus the eccentricity squared — looks intimidating, but its output is intuitive. A perfectly cylindrical body scores near zero; as the ellipse gets rounder, the score climbs.</p>
+    <p>A BRI of around <strong>3.41</strong> is typical for a healthy body shape. Values below that indicate a leaner, less round torso. The <strong>4.45–5.45</strong> band marks elevated roundness, and values above <strong>5.45</strong> indicate high roundness associated with elevated health risk. Why bother when you already have WHtR? Because BRI is more sensitive to subtle changes. When you lose your first few centimetres of waist, WHtR moves linearly, but BRI's elliptical geometry amplifies early changes in abdominal shape — it can register progress that other metrics barely notice. Researchers have also found BRI useful for estimating the proportion of body fat and visceral fat without a scan, making it a favourite in studies where DEXA machines are unavailable.</p>
+    <p>Practically speaking, track BRI alongside WHtR. If both trend downward over months, your abdominal fat is genuinely shrinking — not just shifting around. If WHtR is healthy but BRI sits elevated, you may carry fat in a way that warrants a conversation with your doctor despite the "good" headline number.</p>
+
+    <h2>ABSI Calculator: What Your BMI Cannot See</h2>
+    <p>An <strong>ABSI calculator</strong> computes <strong>A Body Shape Index</strong>, a metric introduced by Nir Krakauer and Jesse Krakauer in 2012 from US national health survey data covering over 14,000 adults. The formula is waist circumference divided by (BMI raised to the two-thirds power, times the square root of height). The units — metres to the power of 11/6 — are odd, but the logic is elegant: ABSI measures how large your waist is <em>relative to what your BMI and height would predict</em>.</p>
+    <p>This matters because BMI's biggest failure mode is the muscular-but-lean person and the thin-but-centrally-fat person — the so-called "skinny fat" phenotype. Two people can share a BMI of 24 while one has a trim waist and the other carries a 95&nbsp;cm waist. ABSI separates them: the first scores low, the second scores high, and Krakauer's research showed that higher ABSI z-scores independently predicted mortality even after accounting for BMI. In WaistWise's screening bands, values <strong>below 0.075</strong> indicate low risk, <strong>0.075–0.080</strong> is average, <strong>0.080–0.085</strong> is high, and <strong>above 0.085</strong> is very high.</p>
+    <p>ABSI is the most "honest" of the four metrics on this page because it refuses to let a normal BMI hide a risky waist. If your BMI says "normal" but your ABSI flags high, that is precisely the combination — normal-weight central obesity — that studies link to the worst metabolic outcomes. It deserves your attention, not your BMI's reassurance.</p>
+
+    <h2>Waist-Hip Ratio: The Classic Apple-vs-Pear Test</h2>
+    <p>The <strong>waist-hip ratio</strong> (WHR) is the oldest metric in this panel, and it still earns its place. Dividing waist by hip circumference distinguishes <strong>apple-shaped</strong> bodies (fat stored centrally, higher risk) from <strong>pear-shaped</strong> bodies (fat stored on hips and thighs, lower risk). The World Health Organization defines abdominal obesity as a WHR of <strong>0.90 or above in men</strong> and <strong>0.85 or above in women</strong>. Below <strong>0.85 for men</strong> and <strong>0.80 for women</strong>, risk is low; the band in between is the moderate-risk warning zone.</p>
+    <p>WHR captures something the other three metrics do not: the protective role of gluteofemoral fat. Hip fat is not just neutral — research suggests it is actively associated with better lipid profiles and insulin sensitivity. So a falling WHR can mean two good things at once: a shrinking waist, a growing hip measurement from strength training, or both. Track it alongside the others and you get a fuller picture of <em>where</em> change is happening, not just how much.</p>
+
+    <h2>Why Four Metrics Beat One</h2>
+    <p>Each metric in the WaistWise panel has a different failure mode, and that is exactly why they are bundled. WHtR is simple but ignores body frame. BRI captures shape but says nothing about weight. ABSI catches the "normal BMI, risky waist" trap but needs an accurate weight. WHR reveals fat distribution but can be skewed by very muscular or very narrow hips. Together, they cross-examine each other: when all four point the same direction, you can be confident in the trend. When they disagree, the disagreement itself is information — for example, a healthy WHtR with a high ABSI is the classic signature of normal-weight central obesity, a pattern worth discussing with a clinician.</p>
+    <p>The <strong>Waist-Health Score</strong> on this page blends the four into a single 0–100 number — WHtR weighted at 35%, BRI and ABSI at 25% each, and WHR at 15% — so you can watch one trend line while keeping the four detailed readings one scroll away. Weighting WHtR highest reflects the strength of the Ashwell evidence base; the rest is balanced so no single quirk of your body dominates the score.</p>
+
+    <h2>The Interactive Ashwell Risk Matrix</h2>
+    <p>The matrix above is Dr. Ashwell's famous shape chart rendered as a living tool. The horizontal axis is waist circumference, the vertical axis is height, and the diagonal bands are the four WHtR zones — which is why they run diagonally: every point along a diagonal shares the same waist-to-height ratio. The green band is the famous "keep your waist to less than half your height" corridor; the blue, amber and red bands are the take-care, increased-risk and highest-risk zones.</p>
+    <p>Click anywhere on the matrix to set your waist and height and watch every metric recalculate instantly. Your position is marked with a crosshair dot. Two practical insights fall out of playing with it. First, notice how <em>narrow</em> the healthy band is for taller people in absolute centimetres — a 190&nbsp;cm person has a healthy waist window of roughly 76–95&nbsp;cm, while a 155&nbsp;cm person gets only 62–78&nbsp;cm. Second, notice how a 5&nbsp;cm change in waist moves short people across zones faster than tall people — one more reason absolute waist cutoffs mislead.</p>
+
+    <h2>Frame Size: Why Bone Structure Adjusts Your Range</h2>
+    <p>Two people of identical height can have meaningfully different healthy waist ranges because skeletons differ. <strong>Frame size</strong> — small, medium or large — is estimated from wrist circumference: the height-to-wrist ratio classifies men above 10.4 as small-framed, 9.6–10.4 as medium and below 9.6 as large, with corresponding thresholds of 11.0 and 10.1 for women. WaistWise shifts your healthy waist range by <strong>±3%</strong> around the standard WHtR 0.40–0.50 band: small frames get a slightly tighter range, large frames a slightly more generous one.</p>
+    <p>This adjustment is deliberately modest. Frame size is a real anatomical factor — broader ribcages and pelvises genuinely accommodate more tissue — but it is not a loophole. A large frame does not convert a 0.62 WHtR into a healthy one; it nudges the boundary by a few centimetres. Treat the pink needle on the range bar as information, not absolution.</p>
+
+    <h2>Measuring Correctly (It Matters More Than You Think)</h2>
+    <p>A tape measure is only as good as its technique, and sloppy technique can swing your WHtR by 0.02–0.03 — enough to hop a category boundary. The protocol used in research studies: stand relaxed with arms at your sides, locate the midpoint between your lowest rib and the top of your hip bone, wrap the tape around <strong>bare skin</strong> at that level, keep it parallel to the floor, breathe out normally and read the number <em>before</em> you breathe in. Do not suck in your stomach; do not measure over jeans. Measure in the morning before eating and at the same time of day each session, because waist circumference fluctuates 1–3&nbsp;cm through the day with meals, hydration and posture.</p>
+    <p>Hips are measured at the widest point of the buttocks, tape parallel to the floor. Wrist is measured just below the wrist bone on your dominant hand, snug but not tight. Height: stand against a wall, heels together, head level, and have someone mark the top of your head — self-reported heights are notoriously optimistic by 1–2&nbsp;cm.</p>
+
+    <h2>Tracking Progress: The Trend Is the Product</h2>
+    <p>A single measurement is a snapshot; a log is a story. WaistWise's <strong>progress tracker</strong> stores every logged measurement on your device (nothing leaves your browser) and computes trend arrows for WHtR, BRI, ABSI and waist change, plus a sparkline of your WHtR history. Log weekly at most — daily noise from meals and water retention will only frustrate you. What you are looking for is the 4–12 week slope: a waist shrinking 0.5–1&nbsp;cm per month alongside a falling WHtR is genuine, sustainable progress, the kind that moves you from the amber band toward the green corridor.</p>
+    <p>Plateaus deserve interpretation, not panic. If your waist stalls but your weight keeps falling, you may be losing fat from limbs first — WHR will reveal this. If weight stalls but WHtR falls, you are likely trading fat for muscle, which is arguably the best outcome of all. This is the payoff of the four-metric bundle: it lets you read the story correctly instead of quitting at the wrong chapter.</p>
+
+    <h2>Limitations and the Health Disclaimer</h2>
+    <div class="disclaimer p-4 my-4">
+      <p class="!mt-0"><strong>Health disclaimer:</strong> WaistWise provides <strong>estimates for informational purposes only</strong> and is not a medical device. These metrics do not diagnose any condition and do not replace professional medical advice, diagnosis or treatment. Waist-based screening is less reliable during pregnancy, for athletes with high muscle mass, for children and adolescents, for older adults with significant muscle loss, and for people with certain medical conditions or of ethnicities where risk thresholds differ. Always seek the advice of a qualified health professional with questions about a medical condition, and never disregard professional advice or delay seeking it because of something you read here.</p>
+    </div>
+    <p>Even in healthy adults, these numbers are screening tools with known limits. They do not measure blood pressure, cholesterol, blood sugar or inflammation — the clinical markers that actually define metabolic syndrome. A perfect WHtR does not guarantee metabolic health, and an imperfect one does not guarantee disease; they shift probabilities, not certainties. Use them as a compass for lifestyle change and as motivation to get proper check-ups, not as a verdict.</p>
+    <p>The bottom line: you cannot manage what you do not measure, and for metabolic health, the tape measure around your waist tells you more than the scale under your feet. Run the full WaistWise panel today, log it, and come back in a month. The green corridor is closer than you think.</p>
+  </article>
+
+  <!-- ============ FAQS ============ -->
+  <section class="max-w-3xl mx-auto px-1 pb-10">
+    <h2 class="text-2xl font-extrabold mb-4">Frequently Asked Questions</h2>
+    <div class="space-y-3">
+      <details class="faq faq-item lab-card p-4">
+        <summary class="font-semibold">What is a waist to height ratio calculator and why does it matter?</summary>
+        <p class="mt-2 text-sm leading-relaxed" style="color:#9AA7B4">A waist to height ratio calculator divides your waist circumference by your height. Research led by Dr. Margaret Ashwell shows that keeping your waist less than half your height predicts cardiometabolic risk better than BMI alone, because waist size reflects visceral fat around the organs while BMI cannot tell muscle from fat.</p>
+      </details>
+      <details class="faq faq-item lab-card p-4">
+        <summary class="font-semibold">What is a healthy waist to height ratio?</summary>
+        <p class="mt-2 text-sm leading-relaxed" style="color:#9AA7B4">A waist to height ratio between 0.40 and 0.50 is considered healthy for adults. Below 0.40 may indicate being underweight, 0.50 to 0.60 signals increased health risk, and above 0.60 is the highest risk zone. These are screening estimates, not diagnoses — always confirm with a clinician.</p>
+      </details>
+      <details class="faq faq-item lab-card p-4">
+        <summary class="font-semibold">What does a body roundness index calculator tell me?</summary>
+        <p class="mt-2 text-sm leading-relaxed" style="color:#9AA7B4">A body roundness index calculator (BRI) models your body as an ellipse using waist circumference and height. A BRI around 3.41 is typical for a healthy body shape; values below that are leaner, while values above 5.45 indicate high roundness and elevated risk. BRI adds shape information that BMI misses.</p>
+      </details>
+      <details class="faq faq-item lab-card p-4">
+        <summary class="font-semibold">How is an ABSI calculator different from BMI?</summary>
+        <p class="mt-2 text-sm leading-relaxed" style="color:#9AA7B4">An ABSI calculator (A Body Shape Index) combines waist circumference, BMI and height into a single number expressed in m^(11/6). Higher ABSI means your waist is large relative to what your BMI and height would predict, which studies link to higher mortality risk. Values under 0.075 are low risk, while values above 0.085 are very high.</p>
+      </details>
+      <details class="faq faq-item lab-card p-4">
+        <summary class="font-semibold">How do I measure my waist correctly for these calculators?</summary>
+        <p class="mt-2 text-sm leading-relaxed" style="color:#9AA7B4">Stand relaxed, find the midpoint between your lowest rib and the top of your hip bone, wrap a tape measure snugly around your bare abdomen at that point, breathe out normally and read the measurement before breathing in. Measure in the morning before eating for the most consistent tracking.</p>
+      </details>
+      <details class="faq faq-item lab-card p-4">
+        <summary class="font-semibold">Can these calculators replace medical advice?</summary>
+        <p class="mt-2 text-sm leading-relaxed" style="color:#9AA7B4">No. WaistWise provides screening estimates for information and motivation only. These metrics do not diagnose any condition, and factors like pregnancy, muscle mass, age, ethnicity and medical history affect what is healthy for you. Discuss your results with a qualified health professional before changing diet or exercise habits.</p>
+      </details>
+    </div>
+  </section>
+</main>
+
+<footer class="border-t py-6" style="border-color:#28303A">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs" style="color:#5b6874">
+    <span class="mono">WAISTWISE · WAIST-HEALTH LAB · ESTIMATES ONLY</span>
+    <span>Not medical advice. Consult a qualified health professional.</span>
+  </div>
+</footer>
+
+<!-- ============ UI WIRING (non-lib) ============ -->
+<script>
+(function(){
+  'use strict';
+  var $ = function(id){ return document.getElementById(id); };
+
+  /* ---------- state ---------- */
+  var state = { unit:'cm', sex:'female', waist:NaN, height:NaN, weight:NaN, hip:NaN, wrist:NaN };
+
+  /* ---------- inputs ---------- */
+  var unitSel=$('unit-select'), sexSel=$('sex-select'),
+      waistEl=$('waist-input'), heightEl=$('height-input'), weightEl=$('weight-input'),
+      hipEl=$('hip-input'), wristEl=$('wrist-input'), errEl=$('input-error');
+
+  function readInputs(){
+    state.unit = unitSel.value;
+    state.sex = sexSel.value;
+    state.waist = wwToCm(waistEl.value, state.unit === 'in' ? 'in' : 'cm');
+    state.height = wwToCm(heightEl.value, state.unit === 'in' ? 'in' : 'cm');
+    state.hip = wwToCm(hipEl.value, state.unit === 'in' ? 'in' : 'cm');
+    state.wrist = wwToCm(wristEl.value, state.unit === 'in' ? 'in' : 'cm');
+    state.weight = wwToKg(weightEl.value, state.unit === 'in' ? 'lb' : 'kg');
+  }
+
+  unitSel.addEventListener('change', function(){
+    var toIn = unitSel.value === 'in';
+    document.querySelectorAll('.unit-label').forEach(function(e){ e.textContent = toIn ? 'in' : 'cm'; });
+    document.querySelectorAll('.wunit-label').forEach(function(e){ e.textContent = toIn ? 'lb' : 'kg'; });
+    $('range-unit').textContent = '(' + (toIn ? 'inches' : 'cm') + ')';
+    readInputs(); analyze();
+  });
+
+  /* ---------- helpers ---------- */
+  function setChip(id, tone){
+    var el = $(id);
+    el.className = 'chip ' + (tone === 'teal' ? 'chip-teal' : tone === 'amber' ? 'chip-amber' : 'chip-rose');
+  }
+  function toneOf(t){ return t === 'teal' ? 'chip-teal' : t === 'amber' ? 'chip-amber' : 'chip-rose'; }
+
+  function metricCard(prefix, res, fmt, barPct){
+    var vEl=$(prefix+'-value'), lEl=$(prefix+'-label'), cEl=$(prefix+'-chip'), bEl=$(prefix+'-bar');
+    if (!res || res.value === null){
+      vEl.textContent='—'; lEl.textContent = res && res.error ? res.error : 'Enter measurements';
+      cEl.textContent='—'; setChip(prefix+'-chip','teal'); bEl.style.width='0%';
+      return;
+    }
+    vEl.textContent = fmt(res.value);
+    lEl.textContent = res.label;
+    cEl.textContent = res.category.replace(/-/g,' ').toUpperCase();
+    setChip(prefix+'-chip', res.tone);
+    bEl.style.width = Math.max(4, Math.min(100, barPct(res.value))) + '%';
+  }
+
+  /* ---------- analysis ---------- */
+  function analyze(){
+    readInputs();
+    errEl.textContent='';
+    var s = state;
+    var whtr = wwWhtr(s.waist, s.height);
+    var bri  = wwBri(s.waist, s.height);
+    var absi = wwAbsi(s.waist, s.weight, s.height);
+    var whr  = wwWhr(s.waist, s.hip, s.sex);
+
+    metricCard('whtr', whtr, function(v){return v.toFixed(3);}, function(v){return Math.min(100, v/0.7*100);});
+    metricCard('bri',  bri,  function(v){return v.toFixed(2);}, function(v){return Math.min(100, v/7*100);});
+    metricCard('absi', absi, function(v){return v.toFixed(4);}, function(v){return Math.min(100, (v-0.06)/0.035*100);});
+    metricCard('whr',  whr,  function(v){return v.toFixed(3);}, function(v){return Math.min(100, v/1.1*100);});
+
+    var sc = wwScore({whtr:whtr, bri:bri, absi:absi, whr:whr});
+    var ring = $('score-ring');
+    if (sc.value === null){
+      $('score-value').textContent='–';
+      $('score-grade').textContent='Awaiting data';
+      ring.style.strokeDashoffset='251.3';
+    } else {
+      $('score-value').textContent=sc.value;
+      $('score-grade').textContent=sc.grade;
+      ring.style.strokeDashoffset = String(251.3 * (1 - sc.value/100));
+      ring.setAttribute('stroke', sc.value>=70 ? '#2DD4BF' : sc.value>=50 ? '#FBBF24' : '#F472B6');
+    }
+    $('report-date').textContent = 'ANALYSED ' + new Date().toISOString().slice(0,10);
+
+    /* frame + range */
+    var frame = wwFrameSize(s.sex, s.height, s.wrist);
+    var fl=$('frame-label'), fr=$('frame-ratio'), vial=$('frame-vial');
+    if (!frame.id){ fl.textContent='—'; fr.textContent='add wrist + height'; vial.style.height='8%'; }
+    else {
+      fl.textContent = frame.label;
+      fr.textContent = 'H/W ratio ' + frame.ratio.toFixed(2);
+      vial.style.height = frame.id==='small' ? '30%' : frame.id==='medium' ? '60%' : '92%';
+    }
+    var range = wwHealthyRange(s.height, frame.id);
+    var toIn = state.unit==='in', conv = toIn ? 0.393701 : 1, dec = toIn ? 1 : 0;
+    if (range.low === null){ $('range-low').textContent='—'; $('range-high').textContent='—'; }
+    else {
+      $('range-low').textContent=(range.low*conv).toFixed(dec);
+      $('range-high').textContent=(range.high*conv).toFixed(dec);
+      /* position band + needle on a 50..130 cm scale */
+      var lo=Math.min(130,Math.max(50,range.low)), hi=Math.min(130,Math.max(50,range.high));
+      $('range-band').style.left=((lo-50)/80*100)+'%';
+      $('range-band').style.right=(100-(hi-50)/80*100)+'%';
+      if (isFinite(s.waist)){
+        var p=Math.min(100,Math.max(0,(s.waist-50)/80*100));
+        $('range-marker').style.left=p+'%'; $('range-marker').style.display='block';
+      } else { $('range-marker').style.display='none'; }
+    }
+
+    drawMatrix();
+  }
+
+  $('calc-btn').addEventListener('click', analyze);
+  $('sample-btn').addEventListener('click', function(){
+    var toIn = state.unit==='in';
+    waistEl.value = toIn ? 32.3 : 82; heightEl.value = toIn ? 66.9 : 170;
+    weightEl.value = toIn ? 150 : 68; hipEl.value = toIn ? 39.4 : 100;
+    wristEl.value = toIn ? 6.3 : 16;
+    analyze();
+  });
+  ['waist-input','height-input','weight-input','hip-input','wrist-input'].forEach(function(id){
+    $(id).addEventListener('input', function(){ /* live update only if previously analysed */ });
+  });
+  sexSel.addEventListener('change', analyze);
+
+  /* ---------- Ashwell matrix ---------- */
+  var MW=560, MH=420, PL=52, PR=14, PT=14, PB=40;
+  var WMIN=50, WMAX=130, HMIN=140, HMAX=210;
+  function mx(w){ return PL + (w-WMIN)/(WMAX-WMIN)*(MW-PL-PR); }
+  function my(h){ return MH-PB - (h-HMIN)/(HMAX-HMIN)*(MH-PT-PB); }
+  var ZONE_FILL = { 'take-care-low':'#1E4D78', 'healthy':'#0F6B5C', 'increased':'#7A5A17', 'highest':'#7A2434', 'none':'#171C22' };
+
+  function drawMatrix(){
+    var cells=$('matrix-cells'), lines=$('matrix-lines'), marker=$('matrix-marker');
+    cells.innerHTML=''; lines.innerHTML=''; marker.innerHTML='';
+    var nx=20, ny=14, html='';
+    for (var i=0;i<nx;i++){
+      for (var j=0;j<ny;j++){
+        var w0=WMIN+(WMAX-WMIN)*i/nx, h0=HMIN+(HMAX-HMIN)*j/ny;
+        var zone=wwAshwellZone(w0+(WMAX-WMIN)/nx/2, h0+(HMAX-HMIN)/ny/2);
+        html+='<rect x="'+mx(w0).toFixed(1)+'" y="'+my(h0+(HMAX-HMIN)/ny).toFixed(1)+
+              '" width="'+((mx(w0+(WMAX-WMIN)/nx)-mx(w0))).toFixed(1)+'" height="'+((my(h0)-my(h0+(HMAX-HMIN)/ny))).toFixed(1)+
+              '" fill="'+ZONE_FILL[zone]+'" opacity="0.85"/>';
+      }
+    }
+    cells.innerHTML=html;
+    /* threshold diagonals 0.4 / 0.5 / 0.6 */
+    var dl='';
+    [0.4,0.5,0.6].forEach(function(t){
+      var w1=WMIN, h1=WMIN/t, w2=Math.min(WMAX,HMAX*t), h2=w2/t;
+      dl+='<line x1="'+mx(w1)+'" y1="'+my(Math.min(HMAX,h1))+'" x2="'+mx(w2)+'" y2="'+my(h2)+
+          '" stroke="#E8EEF3" stroke-width="1.6" stroke-dasharray="7 4" opacity="0.8"/>';
+      dl+='<text x="'+(mx(w2)-4)+'" y="'+(my(h2)+14)+'" fill="#E8EEF3" font-size="11" font-family="JetBrains Mono,monospace" opacity="0.85">'+t.toFixed(1)+'</text>';
+    });
+    /* axes */
+    dl+='<line x1="'+PL+'" y1="'+(MH-PB)+'" x2="'+(MW-PR)+'" y2="'+(MH-PB)+'" stroke="#9AA7B4" stroke-width="1.5"/>';
+    dl+='<line x1="'+PL+'" y1="'+PT+'" x2="'+PL+'" y2="'+(MH-PB)+'" stroke="#9AA7B4" stroke-width="1.5"/>';
+    [60,80,100,120].forEach(function(w){
+      dl+='<text x="'+mx(w)+'" y="'+(MH-PB+18)+'" fill="#9AA7B4" font-size="10" text-anchor="middle" font-family="JetBrains Mono,monospace">'+w+'</text>';
+    });
+    [150,170,190,210].forEach(function(h){
+      dl+='<text x="'+(PL-8)+'" y="'+(my(h)+4)+'" fill="#9AA7B4" font-size="10" text-anchor="end" font-family="JetBrains Mono,monospace">'+h+'</text>';
+    });
+    dl+='<text x="'+((PL+MW-PR)/2)+'" y="'+(MH-6)+'" fill="#9AA7B4" font-size="11" text-anchor="middle" font-family="JetBrains Mono,monospace">WAIST (cm)</text>';
+    dl+='<text x="14" y="'+((PT+MH-PB)/2)+'" fill="#9AA7B4" font-size="11" text-anchor="middle" transform="rotate(-90 14 '+((PT+MH-PB)/2)+')" font-family="JetBrains Mono,monospace">HEIGHT (cm)</text>';
+    lines.innerHTML=dl;
+    /* user marker */
+    if (isFinite(state.waist) && isFinite(state.height) && state.waist>=WMIN && state.waist<=WMAX && state.height>=HMIN && state.height<=HMAX){
+      var x=mx(state.waist), y=my(state.height);
+      marker.innerHTML='<circle cx="'+x+'" cy="'+y+'" r="9" fill="none" stroke="#F472B6" stroke-width="2.5"/>'+
+        '<circle cx="'+x+'" cy="'+y+'" r="3.5" fill="#F472B6"/>'+
+        '<line x1="'+(x-16)+'" y1="'+y+'" x2="'+(x+16)+'" y2="'+y+'" stroke="#F472B6" stroke-width="1.4"/>'+
+        '<line x1="'+x+'" y1="'+(y-16)+'" x2="'+x+'" y2="'+(y+16)+'" stroke="#F472B6" stroke-width="1.4"/>';
+    }
+  }
+
+  var svg=$('matrix-svg'), tip=$('matrix-tip');
+  function svgPoint(evt){
+    var r=svg.getBoundingClientRect();
+    var px=(evt.clientX-r.left)/r.width*MW, py=(evt.clientY-r.top)/r.height*MH;
+    var w=WMIN+(px-PL)/(MW-PL-PR)*(WMAX-WMIN);
+    var h=HMIN+((MH-PB-py)/(MH-PT-PB))*(HMAX-HMIN);
+    return {w:w, h:h};
+  }
+  svg.addEventListener('click', function(evt){
+    var p=svgPoint(evt);
+    if (p.w<WMIN||p.w>WMAX||p.h<HMIN||p.h>HMAX) return;
+    var conv = state.unit==='in' ? 1/2.54 : 1;
+    waistEl.value=(p.w*conv).toFixed(1); heightEl.value=(p.h*conv).toFixed(1);
+    analyze();
+  });
+  svg.addEventListener('mousemove', function(evt){
+    var p=svgPoint(evt);
+    if (p.w<WMIN||p.w>WMAX||p.h<HMIN||p.h>HMAX){ tip.classList.add('hidden'); return; }
+    var z=wwAshwellZone(p.w,p.h);
+    var lbl={'take-care-low':'<0.40 take care','healthy':'0.40–0.50 healthy','increased':'0.50–0.60 increased','highest':'>0.60 highest'}[z]||'—';
+    tip.textContent='w '+p.w.toFixed(1)+' · h '+p.h.toFixed(1)+' · WHtR '+(p.w/p.h).toFixed(3)+' · '+lbl;
+    tip.classList.remove('hidden');
+    var wrap=svg.parentElement.getBoundingClientRect(), r=svg.getBoundingClientRect();
+    tip.style.left=Math.min(r.width-190, evt.clientX-wrap.left+14)+'px';
+    tip.style.top=(evt.clientY-wrap.top-10)+'px';
+  });
+  svg.addEventListener('mouseleave', function(){ tip.classList.add('hidden'); });
+
+  /* ---------- progress tracker (localStorage in UI layer) ---------- */
+  var LS_KEY='waistwise-log-v1';
+  function loadLog(){
+    try { var v=JSON.parse(localStorage.getItem(LS_KEY)||'[]'); return Array.isArray(v)?v:[]; }
+    catch(e){ return []; }
+  }
+  function saveLog(log){ try{ localStorage.setItem(LS_KEY, JSON.stringify(log)); }catch(e){} }
+
+  function arrow(t){
+    if (t===null||t===undefined) return '—';
+    if (t===0) return '<span style="color:#9AA7B4">→ steady</span>';
+    var down = t<0;
+    /* for waist-based metrics, DOWN is good */
+    return down ? '<span style="color:#2DD4BF">↓ improving</span>' : '<span style="color:#F472B6">↑ rising</span>';
+  }
+
+  function renderLog(){
+    var log=wwSortLogDesc(loadLog());
+    var has=log.length>0;
+    $('log-empty').classList.toggle('hidden', has);
+    $('log-content').classList.toggle('hidden', !has);
+    if (!has) return;
+    $('trend-whtr').innerHTML=arrow(wwTrend(log,'whtr'));
+    $('trend-bri').innerHTML=arrow(wwTrend(log,'bri'));
+    $('trend-absi').innerHTML=arrow(wwTrend(log,'absi'));
+    var wc=wwChangePct(log,'waist');
+    $('trend-waist').textContent = wc===null ? '—' : (wc>0?'+':'')+wc.toFixed(1)+'%';
+
+    /* sparkline of WHtR */
+    var sp=$('sparkline'), W=600, H=120, pad=14;
+    var pts=log.filter(function(e){return isFinite(e.whtr);});
+    var html='';
+    if (pts.length>=2){
+      var min=Math.min.apply(null,pts.map(function(e){return e.whtr;}).concat([0.4]));
+      var max=Math.max.apply(null,pts.map(function(e){return e.whtr;}).concat([0.6]));
+      if (max-min<0.02) max=min+0.02;
+      var X=function(i){return pad+i/(pts.length-1)*(W-2*pad);};
+      var Y=function(v){return H-pad-(v-min)/(max-min)*(H-2*pad);};
+      /* healthy band 0.40–0.50 */
+      html+='<rect x="'+pad+'" y="'+Y(0.5)+'" width="'+(W-2*pad)+'" height="'+(Y(0.4)-Y(0.5))+'" fill="rgba(45,212,191,.12)"/>';
+      var d=pts.map(function(e,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(e.whtr).toFixed(1);}).join(' ');
+      html+='<path d="'+d+'" fill="none" stroke="#2DD4BF" stroke-width="2.5"/>';
+      pts.forEach(function(e,i){ html+='<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(e.whtr).toFixed(1)+'" r="4" fill="#F472B6"/>'; });
+    } else {
+      html='<text x="300" y="64" text-anchor="middle" fill="#5b6874" font-size="13" font-family="JetBrains Mono,monospace">LOG 2+ ENTRIES TO SEE YOUR TREND</text>';
+    }
+    sp.innerHTML=html;
+
+    var rows=log.map(function(e,i){
+      return '<tr class="border-t" style="border-color:#28303A">'+
+        '<td class="py-2 pr-3">'+e.date+'</td>'+
+        '<td class="py-2 pr-3">'+(isFinite(e.waist)?e.waist.toFixed(1)+' cm':'—')+'</td>'+
+        '<td class="py-2 pr-3">'+(isFinite(e.whtr)?e.whtr.toFixed(3):'—')+'</td>'+
+        '<td class="py-2 pr-3">'+(isFinite(e.bri)?e.bri.toFixed(2):'—')+'</td>'+
+        '<td class="py-2 pr-3">'+(isFinite(e.absi)?e.absi.toFixed(4):'—')+'</td>'+
+        '<td class="py-2 pr-3">'+(isFinite(e.whr)?e.whr.toFixed(3):'—')+'</td>'+
+        '<td class="py-2"><button class="del-entry btn-ghost px-2 py-1 text-[11px]" data-i="'+i+'">Delete</button></td></tr>';
+    }).join('');
+    $('log-list').innerHTML=rows;
+    Array.prototype.forEach.call(document.querySelectorAll('.del-entry'), function(b){
+      b.addEventListener('click', function(){
+        var l=wwSortLogDesc(loadLog());
+        l.splice(parseInt(b.getAttribute('data-i'),10),1);
+        saveLog(l); renderLog();
+      });
+    });
+  }
+
+  $('log-btn').addEventListener('click', function(){
+    readInputs();
+    var s=state;
+    if (!isFinite(s.waist)||!isFinite(s.height)||s.waist<=0||s.height<=0){
+      errEl.textContent='Run an analysis with waist and height first, then log it.';
+      return;
+    }
+    errEl.textContent='';
+    var log=loadLog();
+    var today=new Date().toISOString().slice(0,10);
+    var entry=wwLogEntry(today, s.waist, s.height, s.weight, s.hip, s.sex);
+    log=log.filter(function(e){return e.date!==today;});
+    log.push(entry);
+    saveLog(log); renderLog();
+  });
+  $('clear-log-btn').addEventListener('click', function(){
+    if (confirm('Delete all logged measurements on this device?')){ saveLog([]); renderLog(); }
+  });
+
+  /* ---------- init ---------- */
+  drawMatrix();
+  renderLog();
+})();
+</script>
+</body>
+</html>
